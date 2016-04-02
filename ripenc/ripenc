@@ -1,0 +1,678 @@
+#!/bin/sh
+
+# RipEnc 1.7 for BeOS
+# Scot Hacker, beos@birdhouse.org  12/99
+# With contributions from many members of the BeOS community
+# Updates at http://www.betips.net/software/
+# See readme.html for details
+
+
+# Default settings
+
+RipEncRC=~/config/settings/ripencrc
+EncodeDir=/boot/home
+RawPath=/dev/disk/ide/atapi/0/slave/0/raw
+BitRate=160
+VBR=n
+VBRQuality=4
+AllTracks=y
+ThisGenre=1
+ThisYear="1999"
+NamingConvention=1
+UseTemplate=n
+PlayWhenDone=n
+HandNameTracks=n
+Comment=" "
+AlertType=2
+
+
+# Script itself is one giant function, called from menu item "s"
+
+Encode()
+{
+
+
+# Clean up from the last usage of RipEnc.
+# We do this at the start of the script 
+# rather than at the end in case the user
+# quit with Ctrl+C during the last usage.
+
+if [ -f /tmp/ripfiles.txt ]; then
+	rm /tmp/ripfiles.txt
+fi
+
+if [ -f /tmp/selectfiles.txt ]; then
+	rm /tmp/selectfiles.txt
+fi
+
+if [ -f /tmp/tracks.txt ]; then
+	rm /tmp/tracks.txt
+fi
+
+if [ -f /tmp/playlist ]; then
+	rm /tmp/playlist
+fi
+
+if [ -f /tmp/tracktitles.txt ]; then
+	rm /tmp/tracktitles.txt
+fi
+
+
+
+# Returns CD volume name
+# This is so nasty because of the way df sets tabular
+# data on stdout. For a long time I thought the problem was
+# that the CDDB was returning tabs in some volume names. I
+# later realized that the problem is with albums that have one-word
+# artists and titles, such as "Can - Delay". This is messy, and 
+# someone with better regular expression skills than me may be 
+# able to clean it up, but this appears to work in all cases.
+
+ThisCD=$(df | grep $RawPath | sed s/cdda.*/cdda/g | sed s/\ \ //g | sed s/\ cdda//g | sed s/cdda//g | sed s/\\///g)
+
+
+
+# Error out if the CD can't be found
+# Jamie Wilkinson (jamie@tave.com) came up with a neat
+# trick to automount CDs if they're not mounted already,
+# but it forced the volume name to "Audio CD", which
+# screws up all of the ID3 tags and attributes. I feel it's
+# better to just be prompted to mount it manually. If you 
+# want his code, ask him.
+
+if [ ! "$ThisCD" ]; then
+	echo
+	echo No audio CD found at specified device location.
+	echo Are you sure you\'ve mounted one\?
+	echo See the README on specifying the correct device path.
+	echo -n "Hit <Enter> to continue"
+	read
+	# Return to start by invoking the original BuildMenu function
+	BuildMenu
+fi
+
+
+
+if [ "$HandNameTracks" == "y" ]; then
+	echo -n "Artist: "
+	read ThisArtist
+	
+	echo -n "Album: "
+	read ThisAlbum
+else
+	# Store name of artist
+	ThisArtist=$(echo "$ThisCD" | sed s/\ -\ .*$//g) 
+
+	# Store name of album
+	ThisAlbum=$(echo "$ThisCD" | sed s/^.*\ -\ //g)  
+fi
+
+
+
+
+# Check to see if the artist directory already exists; if not, create it.
+if [ ! -d "$EncodeDir/$ThisArtist" ]; then
+	mkdir "$EncodeDir/$ThisArtist"
+fi
+
+
+# Check to see if the album directory already exists; if not, create it.
+# How we create it depends on whether user has the MP3 folder template 
+# feature enabled. If enabled, we copy attributes from the template directory.
+
+if [ ! -d "$EncodeDir/$ThisArtist/$ThisAlbum" ]; then
+
+	if [ "$UseTemplate" = "y" ]; then
+		echo
+		echo "Unpacking template folder ... "
+
+		# Copy attributes from the template directory.
+		mkdir -p "$EncodeDir/$ThisArtist/$ThisAlbum"
+		copyattr ~/config/settings/Tracker/DefaultQueryTemplates/audio_x-mpeg "$EncodeDir/$ThisArtist/$ThisAlbum"
+
+	else
+		mkdir -p "$EncodeDir/$ThisArtist/$ThisAlbum"
+	fi
+
+fi
+
+
+
+# Simplify the working path a bit for later use
+WorkingDir="$EncodeDir/$ThisArtist/$ThisAlbum"
+
+
+
+
+# Create a list of tracks to rip (start with all)
+# Each track on the mounted volume has an Audio:Track attribute.
+# If we don't extract this attribute, our list will be alphabetical.
+# It takes a bit of time to create this list, but it's the only way 
+# to have the track list correspond to the CD jacket. It also lets
+# us offer a NamingConvention including the track#. We extract the
+# track title and number for each file in the dir, hack it down to
+# just the info we need, dump to a temp file, and sort that file.
+# The -n flag makes sort put #11 after #10, rather than after #1, etc.
+#
+# I changed this recently to allow for prompting during the hand-naming
+# run; it doesn't use encapsulation to catch output, it just appends. -jamie
+
+echo Building track list. Hang on...
+echo
+
+for i in /"$ThisCD"/wav/*; do #*/
+	
+	# The hand-naming run. -jamie
+	if [ "$HandNameTracks" == "y" ]; then
+		# The track number needs to be corrected, so it has to be read twice :(
+		# Perhaps everything should be in two digit format to save some code. -jamie
+		TrackNum=$(catattr Audio:Track "$i" | sed s/\ \:\ /%/g | cut -f3 -d\%)
+		echo -n "Track $TrackNum title: "
+		read HandTrack
+		CorrectTrackNumber	
+		echo $TrackNum "$HandTrack" >> /tmp/tracktitles.txt
+	fi
+	
+	TrackNum=$(catattr Audio:Track "$i" | sed s/\ \:\ /%/g | cut -f3 -d\%)
+	ThisTrack=$(catattr Audio:Track "$i" | sed s/\ \:\ /%/g | cut -f1 -d\% | sed s/^.*\\/wav\\///g)
+	echo $TrackNum\] "$ThisTrack" >> /tmp/tracks.txt
+done
+
+sort -n /tmp/tracks.txt > /tmp/ripfiles.txt
+
+# If AllTracks is set to "y", all we have to do
+# is remove the digits from the start of each
+# line in the ripfile.
+
+if [ "$AllTracks" == "y" ]; then
+
+	cat /tmp/ripfiles.txt | sed s/^.*\\]\ //g >> /tmp/selectfiles.txt
+	mv -f /tmp/selectfiles.txt /tmp/ripfiles.txt
+	
+	echo Encoding all tracks from $ThisCD:
+	echo
+	if [ "$HandNameTracks" == "y" ]; then
+		cat /tmp/tracktitles.txt
+	else
+		cat /tmp/ripfiles.txt
+	fi
+	echo
+fi
+
+
+
+
+# If AllTracks is set to "n", we create a track chooser. 
+# This assigns a number to each track. User types in
+# the appropriate numbers and we grep the ripfile for
+# occurences of those numbers at the beginning of lines.
+# If found, we strip the number from that line
+# and copy it to another temp file. When the new
+# temp file is done, we replace ripfile with it.
+
+
+
+# Danger! Danger Will Robinson!
+# This may not be hand-track naming friendly. I havn't tested it. -jamie
+
+if [ "$AllTracks" == "n" ]; then
+
+	echo
+	echo Available tracks on "$ThisCD"
+	echo
+	
+	cat /tmp/ripfiles.txt
+
+	echo
+	echo Enter numbers for the tracks you
+	echo want to encode, separated by spaces.
+	echo
+	read -a TrackPicks
+	
+	for z in "${TrackPicks[@]}"; do
+		grep "^$z"\\] /tmp/ripfiles.txt| sed s/^$z\\]\ //g >> /tmp/selectfiles.txt
+	done
+	
+	mv -f /tmp/selectfiles.txt /tmp/ripfiles.txt
+
+
+fi
+
+
+# If I were able to have dual inputs in the encapsulation, I could've cut
+# out a bunch of the hand-naming code and used an identical system to the $ThisTrack
+# reading. Poop. -jamie
+
+# Now encode and tag each file in the list
+{
+	while read ThisTrack; do
+			
+  		if [ "$HandNameTracks" == "y" ]; then
+			# Lame duplication for the sake of the hand naming working properly. :\ -jamie
+			TrackNum=$(grep "$ThisTrack" /tmp/tracks.txt | sed s/\\].*$//g) 
+			CorrectTrackNumber
+			ActualTrackName=$(grep $TrackNum /tmp/tracktitles.txt | cut -c 4- -n)
+		else
+ 			ActualTrackName=$ThisTrack
+ 		fi
+		
+		echo
+		echo Encoding "$ActualTrackName"
+		echo
+
+		#Invoke NameIt function above to get our naming convention
+		NameIt
+				
+	
+
+# PowerPC users -- gogo is not available for PowerPC. 
+# In the two sections below, uncomment the lame line 
+# and comment out the gogo line.		
+		
+		if [ "$VBR" == "y" ]; then
+			#bladeenc -quit -crc /"$ThisCD"/wav/"$ThisTrack" "$WorkingDir/$OutputName" -br $BitRate 
+			#lame -ms -v -V $VBRQuality -h /"$ThisCD"/wav/"$ThisTrack" "$WorkingDir/$OutputName"
+			BeNormal  /"$ThisCD"/wav/"$ThisTrack" | gogo stdin  "$WorkingDir/$OutputName" -b $BitRate	-m s -v $VBRQuality	
+		fi
+		
+		if [ "$VBR" == "n" ]; then
+			#bladeenc -quit -crc /"$ThisCD"/wav/"$ThisTrack" "$WorkingDir/$OutputName" -br $BitRate 
+			#lame -ms -b$BitRate /"$ThisCD"/wav/"$ThisTrack" "$WorkingDir/$OutputName"
+			BeNormal  /"$ThisCD"/wav/"$ThisTrack" | gogo stdin "$WorkingDir/$OutputName" -b $BitRate -m s
+		fi
+		
+		# Set the MIME type properly
+		settype -t audio/x-mpeg "$WorkingDir/$OutputName"
+		
+		# Set the ID3 tags
+		id3ren -nocfg -tagonly -song "$ActualTrackName" -album "$ThisAlbum" -artist "$ThisArtist" -year "$ThisYear" -comment "$Comment" -genre "$ThisGenre" "$WorkingDir/$OutputName"
+		
+		# Add file system attributes
+		id3attr "$WorkingDir/$OutputName"
+		copyattr -n Audio:Length /"$ThisCD"/wav/"$ThisTrack" "$WorkingDir/$OutputName"
+		copyattr -n Audio:Track /"$ThisCD"/wav/"$ThisTrack" "$WorkingDir/$OutputName"
+		addattr -t string Audio:Bitrate "$BitRate kbit" "$WorkingDir/$OutputName"
+		
+		# Add file to playlist if that's enabled -jamie
+		if [ $PlayWhenDone == "y" ]; then
+			echo "$WorkingDir/$OutputName" >> /tmp/playlist
+		fi
+		
+		echo
+		echo Next file...
+			
+	done
+} < /tmp/ripfiles.txt
+
+
+
+
+# Get user's attention
+
+if [ $AlertType == "2" ]; then
+	beep
+fi
+
+if [ $AlertType == "3" ]; then
+	alert "MP3 encoding complete"
+fi
+
+if [ $AlertType == "4" ]; then
+	beep
+	alert "MP3 encoding complete"
+fi
+	
+
+
+
+
+# If PlayWhenDone is enabled, pass a playlist to Tracker, which
+# will pass a playlist to SoundPlay if associated in FileTypes
+if [ $PlayWhenDone == "y" ]; then
+	settype -t text/x-soundplay-playlist /tmp/playlist
+	/system/Tracker /tmp/playlist
+fi
+
+
+}
+
+
+####################################
+# Establish output naming convention
+#
+# CorrectTrackNumber() had to be moved outside
+# of Encode(), so I brought this with it.
+
+NameIt()
+{
+	
+	
+	if [ "$NamingConvention" == "1" ]; then
+		OutputName=$(echo "$ThisArtist - $ActualTrackName.mp3")
+	fi
+
+	if [ "$NamingConvention" == "2" ]; then
+		OutputName=$(echo "$ThisArtist--$ActualTrackName.mp3" | tr ' ' '_')
+	fi
+
+	if [ "$NamingConvention" == "3" ]; then
+		OutputName=$(echo "$ActualTrackName.mp3")
+	fi
+
+	if [ "$NamingConvention" == "4" ]; then
+		OutputName=$(echo "$ActualTrackName.mp3" | tr 'A-Z' 'a-z')
+	fi
+
+	if [ "$NamingConvention" == "5" ]; then
+		OutputName=$(echo "$ActualTrackName.mp3" | tr ' ' '_')
+	fi
+
+	if [ "$NamingConvention" == "6" ]; then
+		TrackNum=$(grep "$ThisTrack" /tmp/tracks.txt | sed s/\\].*$//g)
+		CorrectTrackNumber
+		OutputName=$(echo "$ThisArtist - $ActualTrackName - $TrackNum.mp3")
+	fi
+
+	if [ "$NamingConvention" == "7" ]; then
+		TrackNum=$(grep "$ThisTrack" /tmp/tracks.txt | sed s/\\].*$//g)
+		CorrectTrackNumber
+		OutputName=$(echo "$TrackNum - $ThisArtist - $ThisAlbum - $ActualTrackName.mp3")
+	fi
+
+	if [ "$NamingConvention" == "8" ]; then
+		TrackNum=$(grep "$ThisTrack" /tmp/tracks.txt | sed s/\\].*$//g)
+		CorrectTrackNumber
+		OutputName=$(echo "$TrackNum - $ThisArtist - $ActualTrackName.mp3")
+	fi
+
+	# Jamie's additional convention (it rocks)
+	if [ "$NamingConvention" == "9" ]; then
+		TrackNum=$(grep "$ThisTrack" /tmp/tracks.txt | sed s/\\].*$//g)
+		CorrectTrackNumber
+		OutputName=$(echo "$ThisArtist - $TrackNum - $ActualTrackName.mp3")
+	fi
+
+	if [ "$NamingConvention" == "10" ]; then
+		TrackNum=$(grep "$ThisTrack" /tmp/tracks.txt | sed s/\\].*$//g)
+		CorrectTrackNumber
+		OutputName=$(echo "[$TrackNum] $ActualTrackName.mp3")
+	fi
+
+	if [ "$NamingConvention" == "11" ]; then
+		TrackNum=$(grep "$ThisTrack" /tmp/tracks.txt | sed s/\\].*$//g)
+		CorrectTrackNumber
+		OutputName=$(echo "$TrackNum - $ActualTrackName.mp3")
+	fi
+}
+
+################################################################
+# This function finds out whether the track number is one or two
+# digits long. If one digit long, it inserts a zero before the 
+# track number so you can sort things properly in the Tracker
+# and everything corresponds to the CD jacket properly.
+
+CorrectTrackNumber()
+{
+	if [ "${#TrackNum}" = "1" ]; then
+		TrackNum=$(echo 0$TrackNum)
+	fi
+}
+
+
+
+######################
+# Build the menu
+# Made this into one giant function so we can
+# error out if no CD is inserted without quitting
+# the whole program
+
+BuildMenu()
+{
+
+
+
+while [ "$MENU" != "20" ] ;
+do
+	clear
+	echo "RipEnc version 1.7 for BeOS"
+    echo "As seen on TV. Not sold in any stores."
+
+    echo 
+	echo "1) Change working directory......................["$EncodeDir"]"
+	echo "2) Encode entire CD? (y/n).......................["$AllTracks"]"
+    echo "3) Path to raw CD-ROM device.....................["$RawPath"]"
+    echo "4) Specify encoding bitrate .....................["$BitRate"]"
+    echo "5) Year this album was recorded (opt.)...........["$ThisYear"]"
+    echo "6) Genre for this album (opt.)...................["$ThisGenre"]"
+	echo "7) Comment for this album (opt.).................["$Comment"]"
+    echo "8) Naming convention.............................["$NamingConvention"]"    
+    echo "9) Variable bitrate? (y/n).......................["$VBR"]"    
+    echo "10) VBR quality? (only used if VBR is enabled)...["$VBRQuality"]"    
+    echo "11) Use MP3 folder template?.....................["$UseTemplate"]"
+    echo "12) Play ripped songs when done?.................["$PlayWhenDone"]"
+    echo "13) Name tracks by hand?.........................["$HandNameTracks"]"
+    echo "14) Alert when done (pick one)...................["$AlertType"]"
+    echo
+	echo "p) Save preferences"
+	echo "x) Exit"	
+	echo "s) Start encoding"
+		
+	echo -n "? " ; read MENU
+	
+	case $MENU in
+		1)
+			TEMPSAVETO=$EncodeDir
+			echo
+			echo -n "Enter your working directory: "
+			read EncodeDir
+			if [ ! -d $EncodeDir ] ;
+			then
+				echo -n $EncodeDir "does not exist, create [y/n]? "
+				read create
+				if [ "$create" = "y" ] ;
+				then
+					mkdir $EncodeDir
+				else
+					EncodeDir=$TEMPSAVETO
+				fi
+			fi
+                        if [ "$EncodeDir" = "" ]
+                         then
+                          EncodeDir=$TEMPSAVETO
+                        fi
+                        ;;
+
+
+
+		2)
+
+			echo -n Encode entire album\? \(y\/n\)\ 
+			read AllTracks
+
+			;;
+ 
+ 
+ 
+		3)
+			TEMPDEVICE=$RawPath
+			echo
+			echo -n "Enter full path to device: "
+			read RawPath
+			if [ ! -e $RawPath ] ;
+			then
+				echo $RawPath "does not exist...hit enter to continue"
+				read continue
+				RawPath=$TEMPDEVICE
+			fi
+			if [ "$RawPath" = "" ] ;
+			then
+  				RawPath=$TEMPDEVICE
+			fi
+			;;
+			
+			
+        4)
+            TEMPBITRATE=$BitRate
+	            echo
+                echo -n "Specify a bitrate, e.g. 64, 96, 128, 160, 192, 256, 320 : "
+                  read BitRate
+                     if [ "$BitRate" = "" ] ; then
+                       BitRate=$TEMPBITRATE
+                     fi
+                     ;;
+
+        5)
+             echo
+                echo -n "Enter the year this album was recorded: "
+                  read ThisYear
+                     ;;
+
+        6)
+ 
+	            echo
+#             echo -n "Show genre list? (y/n) "; read yn
+#             	if [ "$yn" == "y" ]; then
+						id3ren -showgen
+#						echo
+#						echo -n Enter a genre by number: ; read ThisGenre
+#					else
+						echo -n Enter a genre by number: ; read ThisGenre											
+#				fi
+                     ;;
+
+		7)
+				echo -n "Enter the comment for this album: "
+				read Comment
+				;;
+
+
+        8)
+ 
+	            echo
+                echo Choose a naming convention:
+                echo
+                echo "1) Artist Name - Track Name.mp3"
+                echo "2) Artist_Name--Track_Name.mp3"
+                echo "3) Track Name.mp3"
+                echo "4) track name.mp3"
+                echo "5) track_name.mp3"
+                echo "6) Artist Name - Track Name - TrackNumber.mp3"
+                echo "7) TrackNumber - Artist Name - Album - Track Name.mp3"                
+                echo "8) TrackNumber - Artist Name - Track Name.mp3" 
+                echo "9) Artist Name - TrackNumber - Track Name.mp3"
+                echo "10) [TrackNumber] Track Name.mp3"
+                echo "11) TrackNumber - Track Name.mp3"                
+                                
+                echo
+                echo -n Enter number for choice: ; read NamingConvention
+                     ;;
+                     
+
+		9)
+
+			echo -n "Use variable bitrate? (y/n)"
+			read VBR
+			;;
+
+
+		10)
+
+			echo -n "VBR quality? (0=highest) : "
+			read VBRQuality
+			;;
+
+			
+
+		11)
+
+			echo -n "Use MP3 folder template? (y/n) : "
+			read UseTemplate
+			;;
+		
+
+		# The Play-all-the-songs-when-you're-done-ripping option -jamie
+		12)
+			echo -n "Play ripped songs when done? (y/n): "
+			read PlayWhenDone
+			;;
+
+		# Hand naming of all the titles. -jamie
+		13)
+			echo -n "Enter the artist, album, and titles of all the tracks by hand? (y/n): "
+			read HandNameTracks
+			;;
+			
+        14)
+ 
+	            echo
+                echo Choose an "alert when done" option:
+                echo
+                echo "1) None"
+                echo "2) Audible beep"
+                echo "3) Pop up alert box"
+                echo "4) Beep and alert box"
+                                
+                echo
+                echo -n Enter number for choice: ; read AlertType
+                     ;;
+                     			
+
+		s|S)
+			Encode
+			;;
+			
+
+		p|P)
+			echo EncodeDir="'"$EncodeDir"'" > "$RipEncRC"
+			echo AllTracks="'"$AllTracks"'" >> "$RipEncRC"
+			echo RawPath="'"$RawPath"'" >> "$RipEncRC"
+			echo BitRate="'"$BitRate"'" >> "$RipEncRC"
+			echo ThisYear="'"$ThisYear"'" >> "$RipEncRC"
+			echo ThisGenre="'"$ThisGenre"'" >> "$RipEncRC"
+			echo NamingConvention="'"$NamingConvention"'" >> "$RipEncRC"
+			echo VBR="'"$VBR"'" >> "$RipEncRC"
+			echo VBRQuality="'"$VBRQuality"'" >> "$RipEncRC"
+			echo UseTemplate="'"$UseTemplate"'" >> "$RipEncRC"
+			echo PlayWhenDone="'"$PlayWhenDone"'" >> "$RipEncRC"
+			echo HandNameTracks="'"$HandNameTracks"'" >> "$RipEncRC"
+			echo Comment="'"$Comment"'" >> "$RipEncRC"
+			echo AlertType="'"$AlertType"'" >> "$RipEncRC"	
+
+			;;
+
+
+
+		x|X)
+
+            exit
+			;;
+			
+	esac
+done
+
+}
+
+
+
+####################################################
+# Running the script itself is now just a matter of 
+# two tasks: read in any pre-existing settings, and 
+# run the BuildMenu function. The encoding function
+# is called from within the BuildMenu function.
+
+# Read in program settings from last time user saved prefs
+if [ -f "$RipEncRC" ] ;
+then
+	. "$RipEncRC"
+fi
+
+
+# Build the menu when program starts
+# by calling the menu function constructed above.
+
+BuildMenu
+
+
+
+
+
